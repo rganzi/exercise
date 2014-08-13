@@ -1,0 +1,194 @@
+---
+title: "Activity Classification"
+output: html_document
+---
+## Executive Summary
+
+[Placeholder]
+
+## Pre-processing the Data
+
+### Dowloading the Data
+
+```{r d/l}
+fileurl <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+filename <- "pml-training.csv"
+
+downloadData <- function() {
+        if (!file.exists(filename)) {
+                download.file(fileurl, dest=filename, method="curl")
+        }
+        data <- read.csv("pml-training.csv", header = TRUE)
+        data
+}
+
+activity <- downloadData()
+```
+
+### Cleaning the Data
+
+Once downloaded, I did some minor cleaning of the data.  
+
+I removed the summary variables from the data set. These variables are labeled "avg" and "sd" and, as functions of other variables, they contain only a few hundred values with the rest being "NAs."  
+
+The `read.csv` function coded a number of variables as factors that I believe should be numeric. As factors, these variables had hundreds of levels. I wrote a loop to re-code them as numeric.
+
+```{r cleaning}
+## remove user, dates/times
+activity.m <- activity[, -c(1:7)]
+
+## remove summary variables (avg & sd)
+navalues <- is.na(activity.m[1, ])
+activity.mi <- activity.m[, !navalues]
+
+## change 2, 200-300 level factor variables to numeric
+for(i in 1:dim(activity.mi)[2]) {
+        if(is.factor(activity.mi[, i])==TRUE) {
+                activity.mi[, i] <- as.numeric(activity.mi[, i])
+        }
+}
+
+activity.min <- activity.mi
+```
+
+## Classification Models
+
+### Partitioning the Data
+
+The first step was to partition the data set into training and testing sets.
+
+```{r part}
+library(caret)
+
+set.seed(3232)
+inTrain <- createDataPartition(activity.min$classe, p=0.7, list=FALSE)
+
+training <- activity.min[inTrain, ]
+testing <- activity.min[-inTrain, ]
+```
+
+### Identifying Near Zero Variance Predictors
+
+To limit the number of ineffective variables run through the classification algorithms, I used the `nearZeroVar()` function in the {caret} package. Twenty-four variables were determined to have near-zero variance by the function. These were removed from the training set.
+
+```{r nzv, results='hide'}
+## near zero variance vars
+nsv <- nearZeroVar(training, saveMetrics=TRUE)
+
+nzvar <- nsv$nzv
+training <- training[, !nzvar]
+```
+
+### Random Forest Model
+
+I evaluated two types of models: a Random Forest model and a Boosting model, which I determined was inferior to the former type. Here, I present only my procedure for fitting the final, Random Forest model.
+
+#### Backwards Feature Selection
+
+I ran the `rfe` feature selection model to find an efficient number of variables from which to build a final model. My control was 10-fold repeated cross-validation. The function evaluated the variables based on accuracy and kappa values, measuring the best 5:10, 15, 20, and 25-variable Random Forest models.
+
+```{r feature.sel, cache=TRUE}
+library(doMC)
+
+y <- training$classe
+x <- training[, -dim(training)[2]]
+
+normalization <- preProcess(x)
+x <- predict(normalization, x)
+x <- as.data.frame(x)
+
+subsets <- c(5:10,15,20,25)
+
+set.seed(21)
+ctrl <- rfeControl(functions = rfFuncs,
+                   method = "repeatedcv",
+                   number = 10, #folds
+                   repeats = 5,
+                   verbose = FALSE)
+
+registerDoMC(cores = 4)
+
+set.seed(126)
+rfProfile <- rfe(x, y,
+                 sizes = subsets,
+                 rfeControl = ctrl)
+
+best <- predictors(rfProfile)
+rfProfile
+```
+
+The results show that a 10-variable model yields an in-sample accuracy above 99.1%. Including all variables in the model increases the accuracy minimally -- to 99.7%. The following plot shows the rate of increase of the model accuracy as the number of variables are increased.
+
+**Fig. 1. Random Forest Accuracy vs. Number of Feature-Selected Variables**
+```{r feature-sel.plot, echo=FALSE}
+plot(rfProfile, type = c("g", "o"))
+```
+
+#### rF Model Fit
+
+I decided to train the final rF model on a selection of XX variables, chosen according to the `rfe()` results.
+
+```{r training.min}
+indices <- function(n) {
+        ind <- best[1:n]
+        
+        matches <- as.integer()
+        for(i in 1:n) {
+                mat <- match(ind[i], names(training))
+                matches <- c(matches, mat)
+        }
+}
+
+indexes <- indices(25)
+training.min <- training[, indexes]
+```
+
+The rF model was built with 10-fold cross-validation, repeated 5 times. I used the default number of trees per iteration (ntree=500).
+
+```{r rF.final, cache=TRUE}
+y1 <- training.min$classe
+x1 <- training.min[, -dim(training.min)[2]]
+
+normalization <- preProcess(x1)
+x1 <- predict(normalization, x1)
+x1 <- as.data.frame(x1)
+
+## from trainControl example
+set.seed(1235)
+
+seeds <- vector(mode = "list", length = 51)
+for(i in 1:50) seeds[[i]] <- sample.int(1000, 22)
+
+ctrl <- trainControl(method = "repeatedcv", 
+                     repeats = 5,
+                     number = 10,
+                     seeds = seeds)
+
+registerDoMC(cores = 4)
+set.seed(2)
+
+rf <- train(x1, y1,
+             method = "rf",
+             ntree=500,
+             trControl = ctrl)
+```
+
+### Evaluating the Model
+
+The model was evaluated on the out-of-sample testing set.
+
+**Table 2. rF Predictions on Testing Set**
+```{r pred.table, echo=FALSE}
+pred <- predict(rf, testing)
+table(pred, testing$classe)
+```
+
+The out-of-sample accuracy is 0.9XXX.
+
+```{r out-sample.acc, echo=FALSE}
+predRight <- pred == testing$classe
+sum(predRight)/nrow(testing)
+```
+
+## Conclusions
+
