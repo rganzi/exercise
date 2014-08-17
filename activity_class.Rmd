@@ -60,7 +60,7 @@ The first step was to partition the data set into training and testing sets.
 ```{r part, message=FALSE}
 library(caret)
 
-set.seed(3232)
+set.seed(3242)
 inTrain <- createDataPartition(activity.min$classe, p=0.8, list=FALSE)
 
 training <- activity.min[inTrain, ]
@@ -159,7 +159,7 @@ ctrl.rf <- trainControl(method = "repeatedcv",
                      seeds = seeds)
 
 registerDoMC(cores = 4)
-set.seed(2)
+set.seed(3)
 
 ## fit model "rf"
 rf <- train(training.min$classe ~ .,
