@@ -1,0 +1,208 @@
+---
+title: "Activity Classification"
+output:
+  html_document: default
+---
+## Executive Summary
+
+A random forest model tuned by the {caret package} yields an accuracy close to that of the published boosting model (99.4%) albeit with a greater number of predictors.
+
+## Getting & Cleaning the Data
+
+### Dowloading the Data
+
+```{r d/l, cache=TRUE}
+fileurl <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+filename <- "pml-training.csv"
+
+downloadData <- function() {
+        if (!file.exists(filename)) {
+                download.file(fileurl, dest=filename, method="curl")
+        }
+        data <- read.csv("pml-training.csv", header = TRUE)
+        data
+}
+
+activity <- downloadData()
+```
+
+### Cleaning the Data
+
+Once downloaded, I did some cleaning of the data:  
+
+I removed the summary variables from the data set. These variables are labeled "avg" and "sd" and, as functions of other variables, they contain only a few hundred values with the rest being "NAs."  
+
+The `read.csv()` function coded a number of variables that I believe should be numeric as factors. These variables had hundreds of levels. I re-coded them as numeric.
+
+```{r cleaning}
+## remove user, dates/times
+activity.m <- activity[, -c(1:7)]
+
+## remove summary variables (avg & sd)
+navalues <- is.na(activity.m[1, ])
+activity.mi <- activity.m[, !navalues]
+
+## change 2, 200-300 level factor variables to numeric
+for(i in 1:dim(activity.mi)[2]-1) {
+        if(is.factor(activity.mi[, i])==TRUE) {
+                activity.mi[, i] <- as.numeric(activity.mi[, i])
+        }
+}
+
+activity.min <- activity.mi
+```
+
+## Classification Model
+
+### Partitioning the Data
+
+The first step was to partition the data set into training and testing sets. I chose to randomly select 70% of the data to train the model.
+
+```{r part, message=FALSE}
+library(caret)
+
+set.seed(3244)
+inTrain <- createDataPartition(activity.min$classe, p=0.7, list=FALSE)
+
+training <- activity.min[inTrain, ]
+testing <- activity.min[-inTrain, ]
+```
+
+### Identifying Near-Zero Variance Predictors
+
+To limit the number of ineffective variables run through the classification algorithms, I used the `nearZeroVar()` function in the `{caret package}`. 24 variables were determined to have near-zero variance by the function. These were removed from the training set.
+
+```{r nzv}
+## near zero variance vars
+nsv <- nearZeroVar(training, saveMetrics=TRUE)
+
+nzvar <- nsv$nzv
+training <- training[, !nzvar]
+```
+
+### Random Forest Model
+
+I evaluated two types of models: a random forest model and a gradient boosting model. Although the paper[1] that reports these same data uses an Ada Boost method, I found that random forest initially performed better than the gbm model. That is not to say that a boosting algorithm, properly tuned, would not ultimately out-perform the rF. But the rF model appeared to require less tuning to achieve results close to those of Ugulino, et. al. Here, I present only my procedure for fitting the random forest model.
+
+#### Backwards Feature Selection
+
+I ran the `rfe()` backwards feature selection function to find an efficient number of variables from which to build a final model (and so as not to overfit the model to the training set). My control was five-fold cross-validation, repeated three times. The function evaluated the variables based on accuracy and kappa values, measuring the best 5, 10, 15, 20, 25, and 30-variable random forest models.
+
+```{r feature.sel, cache=TRUE}
+library(doMC)
+
+y <- training$classe
+x <- training[, -dim(training)[2]]
+
+normalization <- preProcess(x)
+x <- predict(normalization, x)
+x <- as.data.frame(x)
+
+subsets <- seq(5, 30, by=5)
+
+ctrl <- rfeControl(functions = rfFuncs,
+                   method = "repeatedcv",
+                   number = 5,
+                   repeats = 3,
+                   verbose = FALSE)
+
+registerDoMC(cores = 4)
+
+set.seed(20)
+rfProfile <- rfe(x, y,
+                 sizes = subsets,
+                 rfeControl = ctrl)
+
+best <- predictors(rfProfile)
+rfProfile
+```
+
+The results show that a ten-variable model yields an in-sample accuracy above 98%. The accuracy increases at a diminishing rate. Compared to a 30-variable model, using all 52 variables increases the accuracy minimally. The following plot shows the increase in the model accuracy as the number of variables in the model is increased.
+
+The most important variables are roll_belt, yaw_belt, magnet_dumbbell_z, pitch_belt, and magnet_dumbbell_y.
+
+**Fig. 1. Random Forest Accuracy vs. Number of Feature-Selected Variables**
+```{r rfeplot, echo=FALSE}
+## rfProfile plot
+plot(rfProfile, type = c("g", "o"))
+```
+
+#### rF Model Fit
+
+I decided to train the final rF model on a selection of 30 variables, chosen according to the `rfe()` results.
+
+```{r training.min}
+## match indices from var "best" to training vars
+matches <- as.integer()
+indices <- function(n) {
+        ind <- best[1:n]
+        for(i in 1:n) {
+                mat <- match(ind[i], names(training))
+                matches <- c(matches, mat)
+                }
+        matches
+        }
+
+indexes <- indices(30)
+training.min <- training[, c(indexes, dim(training)[2])]
+```
+
+The rF model was built with five-fold cross-validation, repeated three times. I set the model to 500 trees per iteration, and again, the predictors were normalized.
+
+```{r rF.final, cache=TRUE}
+## 5-fold cv, repeated twice
+set.seed(1231)
+ctrl.rf <- trainControl(method = "repeatedcv", 
+                     number = 5,
+                     repeats = 3)
+                        
+registerDoMC(cores = 4)
+
+## fit model "rf"
+rf <- train(training.min$classe ~ .,
+             data = training.min,
+             method = "rf", 
+             preProcess = c("center", "scale"),
+             ntree=500,
+             trControl = ctrl.rf)
+```
+
+The default "m" parameter for random forest classification models is sqrt(p). Here, the best "m" splitting parameter ("mtry") as determined by the {caret package} is:
+
+```{r mtry, echo=FALSE}
+rf$bestTune
+```
+
+### Evaluating the Model
+
+The rF model was applied to predict the values of the "classe" variable of the out-of-sample testing set.
+
+**Table 1. rF Predictions on Testing Set**
+```{r pred.table, echo=FALSE, message=FALSE, warning=FALSE}
+## prediction/classe table
+pred <- predict(rf, testing)
+table(pred, testing$classe)
+```
+
+The out-of-sample accuracy is:
+
+```{r out-sample.acc, echo=FALSE}
+## out-of-sample accuracy rate
+predRight <- pred == testing$classe
+acc <- sum(predRight)/nrow(testing)
+acc
+```
+
+The misclassification rate is:
+
+```{r misclass, echo=FALSE}
+1-acc
+```
+
+## Conclusions
+
+A random forest model tuned by the {caret package} yields an accuracy close to that of the published boosting model (99.4%) albeit with a greater number of predictors.
+
+## References
+
+[1] Ugulino, W.; Cardador, D.; Vega, K.; Velloso, E.; Milidiu, R.; Fuks, H. "Wearable Computing: Accelerometers' Data Classification of Body Postures and Movements." *Proceedings of 21st Brazilian Symposium on Artificial Intelligence. Advances in Artificial Intelligence - SBIA 2012*. In: Lecture Notes in Computer Science. , pp. 52-61. Curitiba, PR: Springer Berlin / Heidelberg, 2012. ISBN 978-3-642-34458-9. DOI: 10.1007/978-3-642-34459-6_6.
